@@ -140,7 +140,8 @@ async fn test_non_blocking_execution() -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-#[tokio::test]
+// #[tokio::test]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn test_local_execution_with_missing_parents() -> Result<(), anyhow::Error> {
     telemetry_subscribers::init_for_testing();
     let mut test_cluster = TestClusterBuilder::new().build().await?;
@@ -199,7 +200,7 @@ async fn test_local_execution_with_missing_parents() -> Result<(), anyhow::Error
     node_knows_txes(node, &vec![digest0]).await;
 
     // 1. Execute with Orchestrator, WaitForLocalExecution
-    // WaitForLocalExecution synchronuously executes all previous txns
+    // WaitForLocalExecution synchronously executes all previous txns
     let digests1 = increment(context, &signer, counter_id.0, 20, pkg_ref).await;
 
     let tx1 = make_counter_increment_transaction_with_wallet_context(

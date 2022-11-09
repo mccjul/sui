@@ -1,13 +1,13 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 use super::{NetworkModel, Primary, PrimaryReceiverHandler, CHANNEL_CAPACITY};
-use crate::{common::create_db_stores, metrics::PrimaryChannelMetrics, PayloadToken};
+use crate::{common::create_db_stores, metrics::{PrimaryChannelMetrics, PrimaryMetrics}, PayloadToken, synchronizer::Synchronizer};
 use arc_swap::ArcSwap;
 use bincode::Options;
 use config::{Parameters, WorkerId};
 use consensus::{dag::Dag, metrics::ConsensusMetrics};
 use crypto::PublicKey;
-use fastcrypto::{hash::Hash, traits::KeyPair};
+use fastcrypto::{hash::Hash, traits::KeyPair, SignatureService};
 use itertools::Itertools;
 use node::NodeStorage;
 use prometheus::Registry;
@@ -22,7 +22,7 @@ use storage::{CertificateStore, ProposerStore};
 use store::rocks::DBMap;
 use store::Store;
 use test_utils::{temp_dir, CommitteeFixture};
-use tokio::sync::watch;
+use tokio::sync::{watch, Mutex};
 use types::{
     BatchDigest, Certificate, CertificateDigest, FetchCertificatesRequest,
     PayloadAvailabilityRequest, PrimaryToPrimary, ReconfigureNotification, Round,
@@ -254,24 +254,365 @@ async fn get_network_peers_from_admin_server() {
     assert!(expected_peer_ids.iter().all(|e| resp.contains(e)));
 }
 
+/*
+// TODO-DNS moved from Core
+#[tokio::test]
+async fn process_header() {
+    telemetry_subscribers::init_for_testing();
+
+    let fixture = CommitteeFixture::builder().randomize_ports(true).build();
+    let committee = fixture.committee();
+    let worker_cache = fixture.shared_worker_cache();
+    let author = fixture.authorities().next().unwrap();
+    let primary = fixture.authorities().nth(1).unwrap();
+
+    let header = author.header(&committee);
+
+    let network_key = primary.network_keypair().copy().private().0.to_bytes();
+    let name = primary.public_key();
+    let mut signature_service = SignatureService::new(primary.keypair().copy());
+
+    let (_tx_reconfigure, rx_reconfigure) =
+        watch::channel(ReconfigureNotification::NewEpoch(committee.clone()));
+    let (tx_sync_headers, _rx_sync_headers) = test_utils::test_channel!(1);
+    let (tx_certificate_waiter, _rx_certificate_waiter) = test_utils::test_channel!(1);
+    let (tx_primary_messages, rx_primary_messages) = test_utils::test_channel!(1);
+    let (_tx_headers_loopback, rx_headers_loopback) = test_utils::test_channel!(1);
+    let (_tx_certificates_loopback, rx_certificates_loopback) = test_utils::test_channel!(1);
+    let (_tx_headers, rx_headers) = test_utils::test_channel!(1);
+    let (tx_consensus, _rx_consensus) = test_utils::test_channel!(1);
+    let (tx_parents, _rx_parents) = test_utils::test_channel!(1);
+    let (_tx_consensus_round_updates, rx_consensus_round_updates) = watch::channel(0u64);
+
+    // Create test stores.
+    let (header_store, certificates_store, payload_store) = create_db_stores();
+
+    // Make the vote we expect to receive.
+    let expected = Vote::new(&header, &name, &mut signature_service).await;
+
+    // Spawn a listener to receive the vote.
+    let address = committee.primary(&header.author).unwrap();
+    let (mut handle, _network) =
+        PrimaryToPrimaryMockServer::spawn(author.network_keypair().copy(), address.clone());
+
+    // Make a synchronizer for the core.
+    let synchronizer = Synchronizer::new(
+        name.clone(),
+        &committee,
+        certificates_store.clone(),
+        payload_store,
+        /* tx_header_waiter */ tx_sync_headers,
+        tx_certificate_waiter,
+        None,
+    );
+
+    let metrics = Arc::new(PrimaryMetrics::new(&Registry::new()));
+
+    let own_address = network::multiaddr_to_address(&committee.primary(&name).unwrap()).unwrap();
+    let network = anemo::Network::bind(own_address)
+        .server_name("narwhal")
+        .private_key(network_key)
+        .start(anemo::Router::new())
+        .unwrap();
+
+    let address = network::multiaddr_to_address(&address).unwrap();
+    let network_key = author.network_keypair().public().0.to_bytes();
+    let peer_info = PeerInfo {
+        peer_id: PeerId(network_key),
+        affinity: anemo::types::PeerAffinity::High,
+        address: vec![address],
+    };
+    network.known_peers().insert(peer_info);
+
+    // Spawn the core.
+    let _core_handle = Core::spawn(
+        name.clone(),
+        committee.clone(),
+        worker_cache,
+        header_store.clone(),
+        certificates_store.clone(),
+        create_test_vote_store(),
+        synchronizer,
+        signature_service,
+        rx_consensus_round_updates,
+        /* gc_depth */ 50,
+        rx_reconfigure,
+        /* rx_primaries */ rx_primary_messages,
+        /* rx_header_waiter */ rx_headers_loopback,
+        /* rx_certificate_waiter */ rx_certificates_loopback,
+        /* rx_proposer */ rx_headers,
+        tx_consensus,
+        /* tx_proposer */ tx_parents,
+        metrics.clone(),
+        P2pNetwork::new(network),
+    );
+
+    // Send a header to the core.
+    tx_primary_messages
+        .send(PrimaryMessage::Header(header.clone()))
+        .await
+        .unwrap();
+
+    // Ensure the listener correctly received the vote.
+    match handle.recv().await.unwrap() {
+        PrimaryMessage::Vote(x) => assert_eq!(x, expected),
+        x => panic!("Unexpected message: {:?}", x),
+    }
+
+    // Ensure the header is correctly stored.
+    let stored = header_store.read(header.digest()).await.unwrap();
+    assert_eq!(stored, Some(header.clone()));
+
+    let mut m = HashMap::new();
+    m.insert("epoch", "0");
+    m.insert("source", "other");
+    assert_eq!(
+        metrics.headers_processed.get_metric_with(&m).unwrap().get(),
+        1
+    );
+
+    // Test idempotence by re-sending the same header and expecting the vote
+
+    // Send the header to the core again.
+    tx_primary_messages
+        .send(PrimaryMessage::Header(header.clone()))
+        .await
+        .unwrap();
+
+    // Ensure the listener correctly received the vote again.
+    match handle.recv().await.unwrap() {
+        PrimaryMessage::Vote(x) => assert_eq!(x, expected),
+        x => panic!("Unexpected message: {:?}", x),
+    }
+
+    assert_eq!(
+        metrics.headers_processed.get_metric_with(&m).unwrap().get(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn process_header_missing_parent() {
+    let fixture = CommitteeFixture::builder().randomize_ports(true).build();
+    let committee = fixture.committee();
+    let worker_cache = fixture.shared_worker_cache();
+    let primary = fixture.authorities().next().unwrap();
+    let network_key = primary.network_keypair().copy().private().0.to_bytes();
+    let name = primary.public_key();
+    let signature_service = SignatureService::new(primary.keypair().copy());
+
+    let (_, rx_reconfigure) = watch::channel(ReconfigureNotification::NewEpoch(committee.clone()));
+    let (tx_sync_headers, _rx_sync_headers) = test_utils::test_channel!(1);
+    let (tx_certificate_waiter, _rx_certificate_waiter) = test_utils::test_channel!(1);
+    let (tx_primary_messages, rx_primary_messages) = test_utils::test_channel!(1);
+    let (_tx_headers_loopback, rx_headers_loopback) = test_utils::test_channel!(1);
+    let (_tx_certificates_loopback, rx_certificates_loopback) = test_utils::test_channel!(1);
+    let (_tx_headers, rx_headers) = test_utils::test_channel!(1);
+    let (tx_consensus, _rx_consensus) = test_utils::test_channel!(1);
+    let (tx_parents, _rx_parents) = test_utils::test_channel!(1);
+    let (_tx_consensus_round_updates, rx_consensus_round_updates) = watch::channel(0u64);
+
+    // Create test stores.
+    let (header_store, certificates_store, payload_store) = create_db_stores();
+
+    // Make a synchronizer for the core.
+    let synchronizer = Synchronizer::new(
+        name.clone(),
+        &committee,
+        certificates_store.clone(),
+        payload_store.clone(),
+        /* tx_header_waiter */ tx_sync_headers,
+        tx_certificate_waiter,
+        None,
+    );
+
+    let metrics = Arc::new(PrimaryMetrics::new(&Registry::new()));
+
+    let own_address = network::multiaddr_to_address(&committee.primary(&name).unwrap()).unwrap();
+    let network = anemo::Network::bind(own_address)
+        .server_name("narwhal")
+        .private_key(network_key)
+        .start(anemo::Router::new())
+        .unwrap();
+
+    // Spawn the core.
+    let _core_handle = Core::spawn(
+        name.clone(),
+        committee.clone(),
+        worker_cache,
+        header_store.clone(),
+        certificates_store.clone(),
+        create_test_vote_store(),
+        synchronizer,
+        signature_service,
+        rx_consensus_round_updates,
+        /* gc_depth */ 50,
+        rx_reconfigure,
+        /* rx_primaries */ rx_primary_messages,
+        /* rx_header_waiter */ rx_headers_loopback,
+        /* rx_certificate_waiter */ rx_certificates_loopback,
+        /* rx_proposer */ rx_headers,
+        tx_consensus,
+        /* tx_proposer */ tx_parents,
+        metrics.clone(),
+        P2pNetwork::new(network),
+    );
+
+    // Send a header to the core.
+    let builder = types::HeaderBuilder::default();
+    let header = builder
+        .author(name.clone())
+        .round(1)
+        .epoch(0)
+        .parents([CertificateDigest::default()].iter().cloned().collect())
+        .with_payload_batch(fixture_batch_with_transactions(10), 0)
+        .build(primary.keypair())
+        .unwrap();
+
+    let digest = header.digest();
+    tx_primary_messages
+        .send(PrimaryMessage::Header(header))
+        .await
+        .unwrap();
+
+    // Ensure the header is not stored.
+    assert!(header_store.read(digest).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn process_header_missing_payload() {
+    let fixture = CommitteeFixture::builder().randomize_ports(true).build();
+    let committee = fixture.committee();
+    let worker_cache = fixture.shared_worker_cache();
+    let primary = fixture.authorities().next().unwrap();
+    let network_key = primary.network_keypair().copy().private().0.to_bytes();
+    let name = primary.public_key();
+    let signature_service = SignatureService::new(primary.keypair().copy());
+
+    let (_, rx_reconfigure) = watch::channel(ReconfigureNotification::NewEpoch(committee.clone()));
+    let (tx_sync_headers, _rx_sync_headers) = test_utils::test_channel!(1);
+    let (tx_certificate_waiter, _rx_certificate_waiter) = test_utils::test_channel!(1);
+    let (tx_primary_messages, rx_primary_messages) = test_utils::test_channel!(1);
+    let (_tx_headers_loopback, rx_headers_loopback) = test_utils::test_channel!(1);
+    let (_tx_certificates_loopback, rx_certificates_loopback) = test_utils::test_channel!(1);
+    let (_tx_headers, rx_headers) = test_utils::test_channel!(1);
+    let (tx_consensus, _rx_consensus) = test_utils::test_channel!(1);
+    let (tx_parents, _rx_parents) = test_utils::test_channel!(1);
+    let (_tx_consensus_round_updates, rx_consensus_round_updates) = watch::channel(0u64);
+
+    // Create test stores.
+    let (header_store, certificates_store, payload_store) = create_db_stores();
+
+    // Make a synchronizer for the core.
+    let synchronizer = Synchronizer::new(
+        name.clone(),
+        &committee,
+        certificates_store.clone(),
+        payload_store.clone(),
+        /* tx_header_waiter */ tx_sync_headers,
+        tx_certificate_waiter,
+        None,
+    );
+
+    let metrics = Arc::new(PrimaryMetrics::new(&Registry::new()));
+
+    let own_address = network::multiaddr_to_address(&committee.primary(&name).unwrap()).unwrap();
+    let network = anemo::Network::bind(own_address)
+        .server_name("narwhal")
+        .private_key(network_key)
+        .start(anemo::Router::new())
+        .unwrap();
+
+    // Spawn the core.
+    let _core_handle = Core::spawn(
+        name.clone(),
+        committee.clone(),
+        worker_cache,
+        header_store.clone(),
+        certificates_store.clone(),
+        create_test_vote_store(),
+        synchronizer,
+        signature_service,
+        rx_consensus_round_updates,
+        /* gc_depth */ 50,
+        rx_reconfigure,
+        /* rx_primaries */ rx_primary_messages,
+        /* rx_header_waiter */ rx_headers_loopback,
+        /* rx_certificate_waiter */ rx_certificates_loopback,
+        /* rx_proposer */ rx_headers,
+        tx_consensus,
+        /* tx_proposer */ tx_parents,
+        metrics.clone(),
+        P2pNetwork::new(network),
+    );
+
+    // Send a header that another node has created to the core.
+    // We need this header to be another's node, because our own
+    // created headers are not checked against having a payload.
+    // Just take another keys other than this node's.
+    let author = fixture.authorities().nth(1).unwrap();
+    let header = author
+        .header_builder(&committee)
+        .with_payload_batch(fixture_batch_with_transactions(10), 0)
+        .build(author.keypair())
+        .unwrap();
+
+    let digest = header.digest();
+    tx_primary_messages
+        .send(PrimaryMessage::Header(header))
+        .await
+        .unwrap();
+
+    // Ensure the header is not stored.
+    assert!(header_store.read(digest).await.unwrap().is_none());
+}
+*/
+
 #[tokio::test]
 async fn test_fetch_certificates_handler() {
     let fixture = CommitteeFixture::builder()
         .randomize_ports(true)
         .committee_size(NonZeroUsize::new(4).unwrap())
         .build();
-    let committee = fixture.committee();
+    let name = fixture.authorities().next().unwrap().public_key();
+    let worker_cache = fixture.shared_worker_cache();
+    let primary = fixture.authorities().next().unwrap();
+    let signature_service = SignatureService::new(primary.keypair().copy());
+    let metrics = Arc::new(PrimaryMetrics::new(&Registry::new()));
 
-    let (tx_primary_messages, _) = test_utils::test_channel!(1);
-    let (_, certificate_store, payload_store) = create_db_stores();
+    let (header_store, certificate_store, payload_store) = create_db_stores();
+    let (tx_certificates, _) = test_utils::test_channel!(1);
+    let (tx_certificate_waiter, _rx_certificate_waiter) = test_utils::test_channel!(1);
+    let (_tx_consensus_round_updates, rx_consensus_round_updates) = watch::channel(0u64);
+
+    let synchronizer = Arc::new(Synchronizer::new(
+        name.clone(),
+        fixture.committee().into(),
+        worker_cache.clone(),
+        certificate_store.clone(),
+        payload_store.clone(),
+        tx_certificate_waiter,
+        rx_consensus_round_updates.clone(),
+        None,
+    ));
     let handler = PrimaryReceiverHandler {
-        tx_primary_messages,
+        name,
+        committee: fixture.committee().into(),
+        worker_cache: worker_cache.clone(),
+        synchronizer: synchronizer.clone(),
+        signature_service,
+        tx_certificates,
+        header_store: header_store.clone(),
         certificate_store: certificate_store.clone(),
         payload_store: payload_store.clone(),
         proposer_store: ProposerStore::new_for_tests(),
+        vote_digest_store: crate::common::create_test_vote_store(),
+        rx_consensus_round_updates: rx_consensus_round_updates.clone(),
+        metrics: metrics.clone(),
+        request_vote_inflight: Arc::new(Mutex::new(HashSet::new())),
     };
 
-    let mut current_round: Vec<_> = Certificate::genesis(&committee)
+    let mut current_round: Vec<_> = Certificate::genesis(&fixture.committee())
         .into_iter()
         .map(|cert| cert.header)
         .collect();
@@ -394,16 +735,43 @@ async fn test_process_payload_availability_success() {
         .randomize_ports(true)
         .committee_size(NonZeroUsize::new(4).unwrap())
         .build();
-    let committee = fixture.committee();
     let author = fixture.authorities().next().unwrap();
+    let name = author.public_key();
+    let worker_cache = fixture.shared_worker_cache();
+    let primary = fixture.authorities().next().unwrap();
+    let signature_service = SignatureService::new(primary.keypair().copy());
+    let metrics = Arc::new(PrimaryMetrics::new(&Registry::new()));
 
-    let (tx_primary_messages, _) = test_utils::test_channel!(1);
-    let (_, certificate_store, payload_store) = create_db_stores();
+    let (header_store, certificate_store, payload_store) = create_db_stores();
+    let (tx_certificates, _) = test_utils::test_channel!(1);
+    let (tx_certificate_waiter, _rx_certificate_waiter) = test_utils::test_channel!(1);
+    let (_tx_consensus_round_updates, rx_consensus_round_updates) = watch::channel(0u64);
+
+    let synchronizer = Arc::new(Synchronizer::new(
+        name.clone(),
+        fixture.committee().into(),
+        worker_cache.clone(),
+        certificate_store.clone(),
+        payload_store.clone(),
+        tx_certificate_waiter,
+        rx_consensus_round_updates.clone(),
+        None,
+    ));
     let handler = PrimaryReceiverHandler {
-        tx_primary_messages,
+        name,
+        committee: fixture.committee().into(),
+        worker_cache: worker_cache.clone(),
+        synchronizer: synchronizer.clone(),
+        signature_service,
+        tx_certificates,
+        header_store: header_store.clone(),
         certificate_store: certificate_store.clone(),
         payload_store: payload_store.clone(),
         proposer_store: ProposerStore::new_for_tests(),
+        vote_digest_store: crate::common::create_test_vote_store(),
+        rx_consensus_round_updates: rx_consensus_round_updates.clone(),
+        metrics: metrics.clone(),
+        request_vote_inflight: Arc::new(Mutex::new(HashSet::new())),
     };
 
     // GIVEN some mock certificates
@@ -412,7 +780,7 @@ async fn test_process_payload_availability_success() {
 
     for i in 0..10 {
         let header = author
-            .header_builder(&committee)
+            .header_builder(&fixture.committee())
             .with_payload_batch(test_utils::fixture_batch_with_transactions(10), 0)
             .build(author.keypair())
             .unwrap();
@@ -512,13 +880,42 @@ async fn test_process_payload_availability_when_failures() {
         .build();
     let committee = fixture.committee();
     let author = fixture.authorities().next().unwrap();
+    let name = author.public_key();
+    let worker_cache = fixture.shared_worker_cache();
+    let primary = fixture.authorities().next().unwrap();
+    let signature_service = SignatureService::new(primary.keypair().copy());
+    let metrics = Arc::new(PrimaryMetrics::new(&Registry::new()));
 
-    let (tx_primary_messages, _) = test_utils::test_channel!(1);
+    let (header_store, _, _) = create_db_stores();
+    let (tx_certificates, _) = test_utils::test_channel!(1);
+    let (tx_certificate_waiter, _rx_certificate_waiter) = test_utils::test_channel!(1);
+    let (_tx_consensus_round_updates, rx_consensus_round_updates) = watch::channel(0u64);
+
+    let synchronizer = Arc::new(Synchronizer::new(
+        name.clone(),
+        fixture.committee().into(),
+        worker_cache.clone(),
+        certificate_store.clone(),
+        payload_store.clone(),
+        tx_certificate_waiter,
+        rx_consensus_round_updates.clone(),
+        None,
+    ));
     let handler = PrimaryReceiverHandler {
-        tx_primary_messages,
+        name,
+        committee: fixture.committee().into(),
+        worker_cache: worker_cache.clone(),
+        synchronizer: synchronizer.clone(),
+        signature_service,
+        tx_certificates,
+        header_store: header_store.clone(),
         certificate_store: certificate_store.clone(),
         payload_store: payload_store.clone(),
         proposer_store: ProposerStore::new_for_tests(),
+        vote_digest_store: crate::common::create_test_vote_store(),
+        rx_consensus_round_updates: rx_consensus_round_updates.clone(),
+        metrics: metrics.clone(),
+        request_vote_inflight: Arc::new(Mutex::new(HashSet::new())),
     };
 
     // AND some mock certificates

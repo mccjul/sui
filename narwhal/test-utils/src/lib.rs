@@ -32,9 +32,10 @@ use types::{
     FetchCertificatesResponse, GetCertificatesRequest, GetCertificatesResponse, Header,
     HeaderBuilder, LatestHeaderRequest, LatestHeaderResponse, PayloadAvailabilityRequest,
     PayloadAvailabilityResponse, PrimaryMessage, PrimaryToPrimary, PrimaryToPrimaryServer,
-    PrimaryToWorker, PrimaryToWorkerServer, RequestBatchRequest, RequestBatchResponse, Round,
-    SequenceNumber, Transaction, Vote, WorkerBatchMessage, WorkerDeleteBatchesMessage,
-    WorkerReconfigureMessage, WorkerSynchronizeMessage, WorkerToWorker, WorkerToWorkerServer,
+    PrimaryToWorker, PrimaryToWorkerServer, RequestBatchRequest, RequestBatchResponse,
+    RequestVoteRequest, RequestVoteResponse, Round, SequenceNumber, Transaction, Vote,
+    WorkerBatchMessage, WorkerDeleteBatchesMessage, WorkerReconfigureMessage,
+    WorkerSynchronizeMessage, WorkerToWorker, WorkerToWorkerServer,
 };
 
 pub mod cluster;
@@ -201,6 +202,12 @@ impl PrimaryToPrimary for PrimaryToPrimaryMockServer {
         Ok(anemo::Response::new(()))
     }
 
+    async fn request_vote(
+        &self,
+        _request: anemo::Request<RequestVoteRequest>,
+    ) -> Result<anemo::Response<RequestVoteResponse>, anemo::rpc::Status> {
+        unimplemented!()
+    }
     async fn get_certificates(
         &self,
         _request: anemo::Request<GetCertificatesRequest>,
