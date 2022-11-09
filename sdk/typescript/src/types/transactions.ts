@@ -416,7 +416,7 @@ export function getTransactionEffects(
   if ('effects' in data) {
     return data.effects;
   }
-  return 'EffectsCert' in data ? data.EffectsCert.effects.effects : undefined;
+  return 'EffectsCert' in data ? data.EffectsCert.effects.data() : undefined;
 }
 
 /* ---------------------------- Transaction Effects --------------------------- */
@@ -502,7 +502,7 @@ export function getNewlyCreatedCoinRefsAfterSplit(
   data: SuiTransactionResponse | SuiExecuteTransactionResponse
 ): SuiObjectRef[] | undefined {
   if ('EffectsCert' in data) {
-    const effects = data.EffectsCert.effects.effects;
+    const effects = data.EffectsCert.effects.data();
     return effects.created?.map((c) => c.reference);
   }
   return undefined;

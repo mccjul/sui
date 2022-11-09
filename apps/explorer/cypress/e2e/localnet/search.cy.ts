@@ -20,7 +20,7 @@ describe('search', () => {
                     throw new Error('Missing effects cert');
                 }
                 const { objectId } =
-                    tx.EffectsCert.effects.effects.created![0].reference;
+                    tx.EffectsCert.effects.data().created![0].reference;
                 cy.visit('/');
                 cy.get('[data-testid=search]').type(objectId).type('{enter}');
                 cy.url().should('include', `/objects/${objectId}`);

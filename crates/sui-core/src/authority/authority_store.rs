@@ -176,7 +176,7 @@ impl<S: Eq + Debug + Serialize + for<'de> Deserialize<'de>> SuiDataStore<S> {
         self.perpetual_tables
             .effects
             .get(transaction_digest)?
-            .map(|data| data.effects)
+            .map(|data| data.into_data())
             .ok_or(SuiError::TransactionNotFound {
                 digest: *transaction_digest,
             })
@@ -691,8 +691,7 @@ impl<S: Eq + Debug + Serialize + for<'de> Deserialize<'de>> SuiDataStore<S> {
             )
             .await?;
 
-        self.notify_read
-            .notify(transaction_digest, &effects.effects);
+        self.notify_read.notify(transaction_digest, effects.data());
 
         // Cleanup the lock of the shared objects. This must be done after we write effects, as
         // effects_exists is used as the guard to avoid re-locking objects for a previously
@@ -739,10 +738,10 @@ impl<S: Eq + Debug + Serialize + for<'de> Deserialize<'de>> SuiDataStore<S> {
         for (_, (object, kind)) in mutated_objects {
             temporary_store.write_object(&ctx, object, kind);
         }
-        for obj_ref in &effects.effects.deleted {
+        for obj_ref in &effects.data().deleted {
             temporary_store.delete_object(&ctx, &obj_ref.0, obj_ref.1, DeleteKind::Normal);
         }
-        for obj_ref in &effects.effects.wrapped {
+        for obj_ref in &effects.data().wrapped {
             temporary_store.delete_object(&ctx, &obj_ref.0, obj_ref.1, DeleteKind::Wrap);
         }
         let (inner_temporary_store, _events) = temporary_store.into_inner();
@@ -1430,7 +1429,7 @@ impl SuiDataStore<AuthoritySignInfo> {
             .get(transaction_digest)?
             .map(|t| t.into());
         Ok(if let Some(signed_tx) = tx {
-            signed_tx.auth_sig().epoch == cur_epoch
+            signed_tx.epoch() == cur_epoch
         } else {
             false
         })

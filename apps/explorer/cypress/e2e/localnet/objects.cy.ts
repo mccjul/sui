@@ -12,7 +12,7 @@ describe('Objects', () => {
                     throw new Error('Missing effects cert');
                 }
                 const { objectId } =
-                    tx.EffectsCert.effects.effects.created![0].reference;
+                    tx.EffectsCert.effects.data().created![0].reference;
                 cy.visit(`/objects/${objectId}`);
                 cy.get('#objectID').contains(objectId);
             });
@@ -33,7 +33,7 @@ describe('Objects', () => {
                     }
 
                     const address = tx.EffectsCert.certificate.data.sender;
-                    const [nft] = tx.EffectsCert.effects.effects.created!;
+                    const [nft] = tx.EffectsCert.effects.data().created!;
                     cy.visit(`/addresses/${address}`);
 
                     // Find a reference to the NFT:
