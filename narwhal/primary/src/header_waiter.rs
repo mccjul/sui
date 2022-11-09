@@ -1,10 +1,7 @@
 // Copyright (c) 2021, Facebook, Inc. and its affiliates
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
-use crate::{
-    metrics::PrimaryMetrics,
-    primary::{PayloadToken, PrimaryMessage},
-};
+use crate::{metrics::PrimaryMetrics, primary::PrimaryMessage};
 use anyhow::Result;
 use config::{Committee, SharedWorkerCache, WorkerId};
 use crypto::PublicKey;
@@ -19,7 +16,7 @@ use std::{
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
-use storage::CertificateStore;
+use storage::{CertificateStore, PayloadToken};
 use store::Store;
 use sui_metrics::{monitored_future, spawn_monitored_task};
 use tokio::{
